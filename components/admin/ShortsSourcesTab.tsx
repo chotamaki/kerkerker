@@ -434,6 +434,28 @@ export function ShortsSourcesTab({
             )}
           </div>
           <div className="flex gap-2">
+            {/* FIX: 补上「添加源」按钮 —— 原组件定义了 handleAdd 却从未渲染该按钮，
+                导致用户只能点「导入配置」（加密订阅入口），普通 API 地址无法添加。 */}
+            <button
+              onClick={handleAdd}
+              className="px-4 py-2 bg-[#46d369] hover:bg-[#3cb85e] text-black rounded-lg transition font-medium text-sm flex items-center gap-2"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              添加源
+            </button>
             <button
               onClick={() => setShowEncryptedImportModal(true)}
               className="px-4 py-2 bg-[#E50914] hover:bg-[#B20710] text-white rounded-lg transition font-medium text-sm flex items-center gap-2"
@@ -543,7 +565,7 @@ export function ShortsSourcesTab({
             <div className="text-center py-12 text-slate-400">
               <div className="text-5xl mb-4">🎬</div>
               <p className="text-lg mb-2">暂无短剧源配置</p>
-              <p className="text-sm">点击上方「导入配置」按钮开始配置</p>
+              <p className="text-sm">点击上方「添加源」按钮开始配置</p>
             </div>
           )}
         </div>
