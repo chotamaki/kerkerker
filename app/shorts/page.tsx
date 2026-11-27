@@ -61,6 +61,7 @@ export default function ShortsPage() {
         const result = await response.json();
 
         if (result.code !== 200 || !result.data) {
+          // 透传后端给出的真实原因，便于定位是超时还是源站问题
           throw new Error(result.msg || "获取短剧列表失败");
         }
 
@@ -71,10 +72,14 @@ export default function ShortsPage() {
           setSources(result.data.sources);
         }
 
+        // 关键：用列表接口实际命中的源去取详情，避免列表切换到备用源后
+        // 详情仍请求已失效的原源，导致所有短剧被过滤为空
+        const activeSource = result.data.source || source;
+
         // 并行获取每个短剧的详情
         const dramasWithEpisodes = await Promise.all(
           dramaList.map(async (drama: any) => {
-            const episodes = await fetchDramaDetail(drama.vod_id, source);
+            const episodes = await fetchDramaDetail(drama.vod_id, activeSource);
             return {
               vod_id: drama.vod_id,
               vod_name: drama.vod_name,
@@ -88,9 +93,10 @@ export default function ShortsPage() {
           })
         );
 
-        // 过滤掉没有可播放视频的短剧
+        // 保留有名称的短剧：即便详情接口暂时失败也能显示封面，
+        // 避免整页被过滤成「暂无短剧内容」
         const validDramas = dramasWithEpisodes.filter(
-          (d) => d.episodes.length > 0 && d.episodes[0].url
+          (d) => d.vod_name && d.vod_name.trim() !== ""
         );
 
         if (append) {
@@ -104,7 +110,9 @@ export default function ShortsPage() {
       } catch (err) {
         console.error("[Shorts Fetch Error]", err);
         if (!append) {
-          setError("加载失败，请刷新重试");
+          // 显示真实错误原因，而不是笼统的「加载失败」
+          const msg = err instanceof Error ? err.message : "加载失败";
+          setError(msg);
         }
       } finally {
         setLoading(false);
@@ -126,7 +134,7 @@ export default function ShortsPage() {
       setPage(nextPage);
       fetchDramas(nextPage, currentSource, true);
     }
-  }, [loadingMore, hasMore, page, fetchDramas, currentSource]);
+  }, [loadingMore, hasMore, page, currentSource]);
 
   // 切换源
   const handleSourceChange = useCallback(
@@ -173,7 +181,8 @@ export default function ShortsPage() {
               />
             </svg>
           </div>
-          <p className="text-white text-lg mb-4">{error}</p>
+          <p className="text-white text-lg mb-2">{error}</p>
+          <p className="text-gray-400 text-xs mb-4">（以上为真实错误原因）</p>
           <button
             onClick={() => fetchDramas(1, currentSource)}
             className="px-6 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
