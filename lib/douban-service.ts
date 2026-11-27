@@ -1,18 +1,87 @@
 /**
  * Douban API Service Client
- * 
+ *
  * 直接调用 kerkerker-douban-service 微服务 (前端直接调用，无代理层)
  * 服务地址通过环境变量 NEXT_PUBLIC_DOUBAN_API_URL 配置
+ *
+ * 图片修复：数据源缓存的图片域名 douban-images.aipan.me 已失效，
+ * 本客户端在拿到数据后，用每条数据自带的豆瓣 ID 调 /api/poster
+ * 换取 wmdb.tv 的有效海报并替换，一处覆盖全站所有豆瓣图片。
  */
 
 const DOUBAN_API_URL = process.env.NEXT_PUBLIC_DOUBAN_API_URL || 'https://iamyourfather.link0.me'
+
+// 已失效的图床域名（数据源服务端配置错误，我们无法修改）
+const BROKEN_IMAGE_HOST = 'douban-images.aipan.me'
+// 需要修复的图片字段
+const IMAGE_FIELDS = ['cover', 'poster_horizontal', 'poster_vertical', 'img', 'image', 'thumb', 'poster']
+
+/**
+ * 递归扫描数据，用豆瓣 ID 换取有效海报替换失效图床地址。
+ * 只在浏览器端执行（服务端无法请求相对路径 /api/poster）。
+ */
+async function repairBrokenImages<T>(input: T): Promise<T> {
+  if (typeof window === 'undefined') return input
+
+  interface FixTask { node: Record<string, any>; id: string }
+  const tasks: FixTask[] = []
+
+  const walk = (node: any) => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) {
+      node.forEach(walk)
+      return
+    }
+    const id = typeof node.id === 'string' && /^\d{4,12}$/.test(node.id) ? node.id : ''
+    const hasBroken = IMAGE_FIELDS.some(
+      (f) => typeof node[f] === 'string' && node[f].includes(BROKEN_IMAGE_HOST)
+    )
+    if (id && hasBroken) tasks.push({ node, id })
+    Object.values(node).forEach(walk)
+  }
+
+  walk(input)
+  if (tasks.length === 0) return input
+
+  // 去重 ID，限制并发，避免一次发出几十个请求
+  const ids = Array.from(new Set(tasks.map((t) => t.id)))
+  const posterMap = new Map<string, string>()
+  const queue = [...ids]
+  const CONCURRENCY = 6
+  const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+    while (queue.length) {
+      const id = queue.shift()!
+      try {
+        const res = await fetch(`/api/poster?id=${id}`)
+        if (!res.ok) continue
+        const json = await res.json()
+        if (json?.poster) posterMap.set(id, json.poster)
+      } catch {
+        // 单个换取失败不影响整体
+      }
+    }
+  })
+  await Promise.all(workers)
+
+  for (const { node, id } of tasks) {
+    const poster = posterMap.get(id)
+    if (!poster) continue
+    for (const f of IMAGE_FIELDS) {
+      if (typeof node[f] === 'string' && node[f].includes(BROKEN_IMAGE_HOST)) {
+        node[f] = poster
+      }
+    }
+  }
+
+  return input
+}
 
 /**
  * 通用请求函数
  */
 async function fetchFromService<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const url = `${DOUBAN_API_URL}${endpoint}`;
-  
+
   try {
     const response = await fetch(url, {
       ...options,
@@ -21,16 +90,18 @@ async function fetchFromService<T>(endpoint: string, options?: RequestInit): Pro
         ...options?.headers,
       },
     });
-    
+
     const data = await response.json();
-    
+
     // Go 服务的响应格式有两种：
     // 1. 包装格式: { code: 200, data: {...} }
     // 2. 直接格式: { id: ..., title: ... }
-    if (data.code !== undefined && data.data !== undefined) {
-      return data.data;
-    }
-    return data;
+    const result = (data.code !== undefined && data.data !== undefined ? data.data : data) as T;
+
+    // 清缓存类请求无需修复图片
+    if (options?.method === 'DELETE') return result;
+
+    return await repairBrokenImages(result);
   } catch (error) {
     console.error(`Douban API error [${endpoint}]:`, error);
     throw error;
@@ -203,10 +274,10 @@ export async function getNewContent(filters: NewFilters = {}): Promise<CategoryD
   if (filters.sort) params.append('sort', filters.sort);
   if (filters.page) params.append('page', String(filters.page));
   if (filters.pageSize) params.append('pageSize', String(filters.pageSize));
-  
+
   const queryString = params.toString();
   const endpoint = queryString ? `/api/v1/new?${queryString}` : '/api/v1/new';
-  
+
   return fetchFromService<CategoryData[]>(endpoint);
 }
 
@@ -244,7 +315,7 @@ export async function searchDouban(
   if (options.yearRange) params.append('year_range', options.yearRange);
   if (options.start) params.append('start', String(options.start));
   if (options.limit) params.append('limit', String(options.limit));
-  
+
   return fetchFromService<SearchResult>(`/api/v1/search?${params.toString()}`);
 }
 
@@ -336,11 +407,10 @@ export async function getCalendar(filters: CalendarFilters = {}): Promise<Calend
   const params = new URLSearchParams();
   if (filters.start_date) params.append('start_date', filters.start_date);
   if (filters.end_date) params.append('end_date', filters.end_date);
-  if (filters.region) params.append('region', filters.region);
-  
+
   const queryString = params.toString();
   const endpoint = queryString ? `/api/v1/calendar?${queryString}` : '/api/v1/calendar';
-  
+
   return fetchFromService<CalendarResponse>(endpoint);
 }
 
@@ -352,10 +422,10 @@ export async function getAiringToday(filters: AiringFilters = {}): Promise<Calen
   const params = new URLSearchParams();
   if (filters.page) params.append('page', String(filters.page));
   if (filters.region) params.append('region', filters.region);
-  
+
   const queryString = params.toString();
   const endpoint = queryString ? `/api/v1/calendar/airing?${queryString}` : '/api/v1/calendar/airing';
-  
+
   return fetchFromService<CalendarEntry[]>(endpoint);
 }
 
@@ -365,4 +435,3 @@ export async function getAiringToday(filters: AiringFilters = {}): Promise<Calen
 export async function clearCalendarCache(): Promise<void> {
   await fetchFromService('/api/v1/calendar', { method: 'DELETE' });
 }
-
