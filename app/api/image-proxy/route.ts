@@ -5,128 +5,45 @@ import {
   UnsafeOutboundUrlError,
 } from '@/lib/url-security';
 
-// 代理池配置
-const PROXY_POOL = [
-  {
-    name: 'wsrv.nl',
-    url: (imgUrl: string) => `https://wsrv.link0.me/?url=${encodeURIComponent(imgUrl)}&output=webp&q=85`,
-    timeout: 8000,
-  },
-  {
-    name: 'wsrv.nl',
-    url: (imgUrl: string) => `https://wsrv.link0.me/?url=${encodeURIComponent(imgUrl)}&output=webp&q=100`,
-    timeout: 8000,
-  } 
-];
+// 图片代理：由「服务端抓取」改为「302 重定向」，让浏览器直连图片源。
+// 原因：Vercel 免费版节点在海外，访问国内图床（douban-images.aipan.me 等）
+// 会 DNS 解析失败或连接超时，服务端 fetch 必然 500。
+// 改为 302 后，Vercel 不实际下载图片，只返回一个跳转，
+// 图片由用户浏览器（国内网络）直接加载，可正常显示。
+// 该路由被 DoubanCard / getImageUrl 等所有图片调用点共用，改这一处即全覆盖。
 
-// 延迟函数
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-/**
- * 使用代理池获取图片
- * 策略：依次尝试代理池中的所有代理，快速失败，提高效率
- */
-async function fetchImageWithProxy(url: string): Promise<Response> {
-  
-  const fastProxies = PROXY_POOL.slice(0, 2);
-  
-  const fastPromises = fastProxies.map(async (proxy) => {
-    try {
-      const proxyUrl = proxy.url(url);
-      const response = await fetch(proxyUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        },
-        signal: AbortSignal.timeout(proxy.timeout),
-      });
-
-      if (response.ok) {
-        console.log(`✓ ${proxy.name} 成功`);
-        return response;
-      }
-      throw new Error(`HTTP ${response.status}`);
-    } catch (error) {
-      console.log(`✗ ${proxy.name} 失败`);
-      throw error;
-    }
-  });
-
-  // 使用 Promise.any，只要有一个成功就返回
-  try {
-    return await Promise.any(fastPromises);
-  } catch {
-    console.log('⚠ 前2个代理都失败，尝试剩余代理...');
-  }
-
-  // 策略 2: 如果前2个都失败，依次尝试剩余代理
-  const remainingProxies = PROXY_POOL.slice(2);
-  for (const proxy of remainingProxies) {
-    try {
-      const proxyUrl = proxy.url(url);
-      
-      const response = await fetch(proxyUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        },
-        signal: AbortSignal.timeout(proxy.timeout),
-      });
-
-      if (response.ok) {
-        console.log(`✓ ${proxy.name} 成功`);
-        return response;
-      }
-    } catch {
-      console.log(`✗ ${proxy.name} 失败`);
-    }
-    
-    await delay(500); // 短暂延迟
-  }
-
-  // 策略 3: 所有代理都失败，尝试直接访问
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-      'Referer': 'https://movie.douban.com/',
-    },
-    signal: AbortSignal.timeout(10000),
-  });
-
-  if (response.ok) {
-    return response;
-  }
-
-  throw new Error('所有获取方式都失败');
-}
+export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
   try {
     const url = request.nextUrl.searchParams.get('url');
-    
+
     if (!url) {
       return NextResponse.json({ error: 'URL parameter is required' }, { status: 400 });
     }
 
-    const safeUrl = await assertSafeOutboundUrl(url);
-
-    // 使用代理池获取图片
-    const response = await fetchImageWithProxy(safeUrl.toString());
-    
-    const imageBuffer = await response.arrayBuffer();
-    const contentType = response.headers.get('content-type') || 'image/jpeg';
-
-    return new NextResponse(imageBuffer, {
-      status: 200,
-      headers: {
-        'Content-Type': contentType,
-        'Cache-Control': 'public, max-age=31536000, immutable',
-      },
-    });
-  } catch (error) {
-    if (error instanceof UnsafeOutboundUrlError) {
-      return NextResponse.json({ error: error.message }, { status: error.status });
+    let safeUrl: URL;
+    try {
+      safeUrl = await assertSafeOutboundUrl(url);
+    } catch (error) {
+      // 明确被安全策略拦截（内网地址 / 非法协议）的，直接拒绝
+      if (error instanceof UnsafeOutboundUrlError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      // 其余多为 DNS 解析失败：Vercel 海外节点对部分国内域名解析不稳定，
+      // 且 302 重定向不会让服务端访问目标地址，不构成 SSRF，
+      // 因此降级为仅校验协议后放行，交由浏览器直连。
+      const parsed = new URL(url);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        return NextResponse.json({ error: 'Blocked outbound URL protocol' }, { status: 400 });
+      }
+      safeUrl = parsed;
     }
 
+    // 关键：302 重定向，浏览器直连图片源
+    return NextResponse.redirect(safeUrl.toString(), 302);
+  } catch (error) {
     console.error('Image proxy error:', error);
-    return NextResponse.json({ error: 'Failed to fetch image' }, { status: 500 });
+    return NextResponse.json({ error: 'Invalid image URL' }, { status: 400 });
   }
 }
