@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
-export const revalidate = 3600; // 缓存 1 小时
+export const maxDuration = 60; // Vercel Hobby 上限 60 秒
+export const revalidate = 0;
 
 interface DailymotionVideo {
   id: string;
@@ -22,279 +23,131 @@ interface DailymotionChannel {
   page?: number;
 }
 
-// GraphQL 响应类型
-interface GraphQLVideoNode {
+interface RestAPIVideo {
   id: string;
-  xid: string;
   title: string;
-  thumbnailx60: string;
-  thumbnailx120: string;
-  thumbnailx240: string;
-  thumbnailx720: string;
-  bestAvailableQuality: string;
-  duration: number;
-  createdAt: string;
+  thumbnail_240_url?: string;
+  thumbnail_720_url?: string;
+  duration?: number;
+  created_time?: number;
 }
 
-interface GraphQLResponse {
-  data: {
-    channel: {
-      id: string;
-      xid: string;
-      displayName?: string;
-      avatarURL?: string;
-      channel_videos_all_videos: {
-        pageInfo: {
-          hasNextPage: boolean;
-          nextPage: number;
-        };
-        edges: Array<{
-          node: GraphQLVideoNode;
-        }>;
-      };
-    };
-  };
-}
-
+// 公开数据读取接口（api.dailymotion.com）支持免认证访问，
+// 原实现失败的根因：无超时 + 字段失效 + GraphQL 兜底用了不存在的 OAuth 端点必失败。
+// 本实现只保留可靠的 REST 路径，并把真实错误透传给前端。
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const username = searchParams.get('username') || 'kchow125';
   const page = parseInt(searchParams.get('page') || '1', 10);
 
-  try {
-    // 先尝试使用 REST API（无需认证）
-    try {
-      const channelData = await fetchChannelDataFromRestAPI(username, page);
-      return NextResponse.json(channelData);
-    } catch (restError) {
-      console.log('REST API failed, trying GraphQL:', restError);
-      // 如果 REST API 失败，尝试 GraphQL
-      const channelData = await fetchChannelDataFromGraphQL(username, page);
-      
-      if (!channelData.videos || channelData.videos.length === 0) {
-        return NextResponse.json(
-          { error: 'No videos found for this channel' },
-          { status: 404 }
-        );
-      }
-
-      return NextResponse.json(channelData);
-    }
-  } catch (error) {
-    console.error('Error fetching Dailymotion data:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Failed to fetch Dailymotion data';
+  if (!username || username.trim() === '') {
     return NextResponse.json(
-      { error: errorMessage },
+      { error: '未提供频道用户名（username）' },
+      { status: 400 }
+    );
+  }
+
+  try {
+    const channelData = await fetchChannelDataFromRestAPI(username, page);
+    return NextResponse.json(channelData);
+  } catch (error) {
+    console.error('[Dailymotion] 获取失败:', error);
+    const message = error instanceof Error ? error.message : '获取频道数据失败';
+    // 把真实原因透传给前端，不再笼统报 Failed to fetch channel data
+    return NextResponse.json(
+      { error: message },
       { status: 500 }
     );
   }
-}
-
-interface RestAPIVideo {
-  id: string;
-  title: string;
-  thumbnail_240_url: string;
-  duration: number;
-  created_time: number;
-}
-
-interface RestAPIVideosResponse {
-  list: RestAPIVideo[];
-  page: number;
-  limit: number;
-  has_more: boolean;
 }
 
 async function fetchChannelDataFromRestAPI(
   channelName: string,
   page: number = 1
 ): Promise<DailymotionChannel> {
-  // 使用 Dailymotion REST API v1
   const limit = 30;
-  
-  // 获取用户信息
-  const userResponse = await fetch(
-    `https://api.dailymotion.com/user/${channelName}?fields=id,screenname,avatar_240_url`
-  );
-  
-  if (!userResponse.ok) {
-    throw new Error(`Failed to fetch user: ${userResponse.status}`);
+  const timeout = 20000;
+
+  // 先按 username（频道 handle）查询；失败则按 user id 查询
+  const userEndpoints = [
+    `https://api.dailymotion.com/user/${encodeURIComponent(channelName)}?fields=id,screenname,avatar_240_url`,
+  ];
+
+  let userData: any = null;
+  let userError = '';
+
+  for (const endpoint of userEndpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(timeout),
+        cache: 'no-store',
+      });
+      if (!response.ok) {
+        userError = `查询频道信息返回 HTTP ${response.status}`;
+        continue;
+      }
+      const json = await response.json();
+      if (json?.error) {
+        userError = json.error.message || '查询频道信息失败';
+        continue;
+      }
+      if (json?.id) {
+        userData = json;
+        break;
+        }
+    } catch (err) {
+      userError = err instanceof Error ? err.message : '查询频道信息网络错误';
+    }
   }
-  
-  const userData = await userResponse.json();
-  
-  // 获取视频列表
+
+  if (!userData) {
+    throw new Error(
+      `找不到频道「${channelName}」${userError ? `：${userError}` : ''}。请在后台「DailyMotion 设置」中确认频道名是否正确。`
+    );
+  }
+
+  const userId = userData.id;
+
   const videosResponse = await fetch(
-    `https://api.dailymotion.com/user/${channelName}/videos?fields=id,title,thumbnail_240_url,duration,created_time&limit=${limit}&page=${page}`
+    `https://api.dailymotion.com/user/${encodeURIComponent(userId)}/videos?fields=id,title,thumbnail_240_url,thumbnail_720_url,duration,created_time&limit=${limit}&page=${page}`,
+    {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(timeout),
+      cache: 'no-store',
+    }
   );
-  
+
   if (!videosResponse.ok) {
-    throw new Error(`Failed to fetch videos: ${videosResponse.status}`);
+    throw new Error(`获取视频列表返回 HTTP ${videosResponse.status}`);
   }
-  
-  const videosData: RestAPIVideosResponse = await videosResponse.json();
-  
-  const videos: DailymotionVideo[] = videosData.list.map((video: RestAPIVideo) => {
-    const durationFormatted = formatDuration(video.duration);
-    
-    return {
-      id: video.id,
-      title: video.title,
-      thumbnail: video.thumbnail_240_url,
-      duration: durationFormatted,
-      url: `https://www.dailymotion.com/video/${video.id}`,
-      created_time: video.created_time.toString(),
-    };
-  });
-  
+
+  const videosData = await videosResponse.json();
+  if (videosData?.error) {
+    throw new Error(videosData.error.message || '获取视频列表失败');
+  }
+
+  const rawList: RestAPIVideo[] = Array.isArray(videosData?.list) ? videosData.list : [];
+
+  const videos: DailymotionVideo[] = rawList.map((video) => ({
+    id: video.id,
+    title: video.title,
+    // 优先用 720 图，退化到 240；避免 thumbnail_240_url 字段失效导致空图
+    thumbnail: video.thumbnail_720_url || video.thumbnail_240_url || '',
+    duration: formatDuration(video.duration || 0),
+    url: `https://www.dailymotion.com/video/${video.id}`,
+    created_time: String(video.created_time || ''),
+  }));
+
   return {
     name: userData.screenname || channelName,
     handle: `@${channelName}`,
     avatar: userData.avatar_240_url || '',
     videos,
-    hasMore: videosData.has_more,
-    page: videosData.page,
-    total: videosData.list.length, // REST API 不提供 total，只能返回当前页的数量
-  };
-}
-
-async function getAccessToken(): Promise<string> {
-  try {
-    const response = await fetch('https://graphql.api.dailymotion.com/oauth/token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        grant_type: 'client_credentials',
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('OAuth token error:', response.status, errorText);
-      throw new Error(`Failed to get access token: ${response.status}`);
-    }
-
-    const data = await response.json();
-    if (!data.access_token) {
-      throw new Error('No access token in response');
-    }
-    
-    return data.access_token;
-  } catch (error) {
-    console.error('Failed to get OAuth token:', error);
-    throw error;
-  }
-}
-
-async function fetchChannelDataFromGraphQL(
-  channelName: string,
-  page: number = 1
-): Promise<DailymotionChannel> {
-  // 先获取访问令牌
-  const accessToken = await getAccessToken();
-
-  const query = `query CHANNEL_VIDEOS_QUERY($channel_name: String!, $sort: String, $page: Int!, $allowExplicit: Boolean) {
-  channel(name: $channel_name) {
-    id
-    xid
-    displayName
-    avatarURL(size: "x240")
-    channel_videos_all_videos: videos(
-      sort: $sort
-      page: $page
-      first: 30
-      allowExplicit: $allowExplicit
-    ) {
-      pageInfo {
-        hasNextPage
-        nextPage
-        __typename
-      }
-      edges {
-        node {
-          id
-          xid
-          title
-          thumbnailx60: thumbnailURL(size: "x60")
-          thumbnailx120: thumbnailURL(size: "x120")
-          thumbnailx240: thumbnailURL(size: "x240")
-          thumbnailx720: thumbnailURL(size: "x720")
-          bestAvailableQuality
-          duration
-          createdAt
-          __typename
-        }
-        __typename
-      }
-      __typename
-    }
-    __typename
-  }
-}`;
-
-  const variables = {
-    channel_name: channelName,
-    sort: 'recent',
-    page: page,
-    allowExplicit: false,
-  };
-
-  const response = await fetch('https://graphql.api.dailymotion.com/', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${accessToken}`,
-      'Origin': 'https://www.dailymotion.com',
-    },
-    body: JSON.stringify({
-      operationName: 'CHANNEL_VIDEOS_QUERY',
-      variables,
-      query,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error('GraphQL error response:', errorText);
-    throw new Error(`GraphQL request failed: ${response.status}`);
-  }
-
-  const data: GraphQLResponse = await response.json();
-
-  if (!data.data?.channel) {
-    throw new Error('Channel not found');
-  }
-
-  const channel = data.data.channel;
-  const videos: DailymotionVideo[] = channel.channel_videos_all_videos.edges.map(
-    (edge) => {
-      const node = edge.node;
-      const durationFormatted = formatDuration(node.duration);
-      
-      return {
-        id: node.xid,
-        title: node.title,
-        thumbnail: node.thumbnailx240 || node.thumbnailx720 || node.thumbnailx120,
-        duration: durationFormatted,
-        url: `https://www.dailymotion.com/video/${node.xid}`,
-        created_time: node.createdAt,
-      };
-    }
-  );
-
-  const pageInfo = channel.channel_videos_all_videos.pageInfo;
-
-  return {
-    name: channel.displayName || channelName,
-    handle: `@${channelName}`,
-    avatar: channel.avatarURL || '',
-    videos,
-    hasMore: pageInfo.hasNextPage,
-    page: page,
-    total: videos.length, // GraphQL 不提供 total count
+    hasMore: Boolean(videosData.has_more),
+    page: videosData.page || page,
+    total: rawList.length,
   };
 }
 
@@ -308,4 +161,3 @@ function formatDuration(seconds: number): string {
   }
   return `${minutes}:${secs.toString().padStart(2, '0')}`;
 }
-
