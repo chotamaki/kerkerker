@@ -25,17 +25,17 @@ interface HistoryItem {
 interface CategoryOption {
   type_id: string;
   type_name: string;
-  byName?: string; // 若设置，则前端按此 type_name 过滤，不传 t 参数
 }
 
 const HISTORY_KEY = "shorts_play_history_v1";
 const MAX_HISTORY = 80;
 
-// 兜底分类（源站不返回 class 时，按 type_name 前端过滤）
+// 短剧分类（实测源站真实 type_id：0=全部混合，46=真人短剧，52=AI漫剧）
+// 直接用真实 ID 传给接口切换分类，不靠前端按名称过滤
 const FALLBACK_CATEGORIES: CategoryOption[] = [
-  { type_id: "", type_name: "全部" },
-  { type_id: "", type_name: "真人短剧", byName: "短剧" },
-  { type_id: "", type_name: "AI漫剧", byName: "AI漫剧" },
+  { type_id: "0", type_name: "全部" },
+  { type_id: "46", type_name: "真人短剧" },
+  { type_id: "52", type_name: "AI漫剧" },
 ];
 
 function PlayIcon() {
@@ -128,16 +128,14 @@ export default function ShortsHomePage() {
   const [years, setYears] = useState<string[]>([]);
 
   // 加载精选列表（带分类/年份筛选）
-  // clearType=true 表示明确传 t=（空）以清除后台分类锁定，取全库混合
-  const loadList = useCallback(async (p: number, append: boolean, typeId?: string, year?: string, clearType?: boolean) => {
+  // typeId 为真实分类 ID：0=全部混合，46=真人短剧，52=AI漫剧
+  const loadList = useCallback(async (p: number, append: boolean, typeId?: string, year?: string) => {
     setLoading(true);
     setError(null);
     try {
       let url = `/api/shorts/list?pg=${p}`;
       if (typeId) {
         url += `&t=${encodeURIComponent(typeId)}`;
-      } else if (clearType) {
-        url += `&t=`;
       }
       if (year) url += `&year=${encodeURIComponent(year)}`;
       const res = await fetch(url);
@@ -159,19 +157,24 @@ export default function ShortsHomePage() {
       setPage(p);
       setPagecount(json.data.pagecount || 1);
 
-      // 用源站返回的 class 动态生成分类按钮
+      // 从源站 class 里按名称匹配真实分类 ID（换源也能自适应），只保留短剧相关
       const serverClass: CategoryOption[] = Array.isArray(json.data.class)
-        ? json.data.class
-            .map((c: any) => ({
-              type_id: String(c.type_id ?? ""),
-              type_name: String(c.type_name ?? ""),
-            }))
-            .filter((c: CategoryOption) => c.type_name)
+        ? json.data.class.map((c: any) => ({
+            type_id: String(c.type_id ?? ""),
+            type_name: String(c.type_name ?? ""),
+          }))
         : [];
-      // 源站分类太多时只保留常见的短剧相关类，避免按钮爆炸
-      if (serverClass.length > 0 && serverClass.length <= 20) {
-        setCategories([{ type_id: "", type_name: "全部" }, ...serverClass]);
-      }
+      const findId = (name: string, fallback: string) => {
+        const hit = serverClass.find(
+          (c) => c.type_name === name || c.type_name.includes(name)
+        );
+        return hit && hit.type_id ? hit.type_id : fallback;
+      };
+      setCategories([
+        { type_id: "0", type_name: "全部" },
+        { type_id: findId("短剧", "46"), type_name: "真人短剧" },
+        { type_id: findId("AI漫剧", "52"), type_name: "AI漫剧" },
+      ]);
 
       // 从本页数据的 vod_time 提取年份，供年份筛选
       const foundYears = Array.from(
@@ -192,31 +195,28 @@ export default function ShortsHomePage() {
   }, []);
 
   useEffect(() => {
-    // 首屏取全库混合（清除后台分类锁定），这样真人短剧/AI漫剧都能看到
-    loadList(1, false, "", "", true);
+    // 首屏取全库混合（t=0），之后可点分类切真人短剧/AI漫剧
+    loadList(1, false, "0");
   }, [loadList]);
 
   // 当前选中的分类配置（用 type_name 作唯一标识）
   const currentCat = categories.find((c) => c.type_name === selectedCat);
-  // 前端按名称过滤的值（兜底分类用）
-  const nameFilter = currentCat?.byName || "";
-  // 真正传给接口的分类 ID（仅数字 type_id）
-  const apiTypeId = currentCat && /^\d+$/.test(currentCat.type_id) ? currentCat.type_id : "";
+  // 真正传给接口的分类 ID（真实数字 ID）
+  const apiTypeId = currentCat && /^\d+$/.test(currentCat.type_id) ? currentCat.type_id : "0";
 
-  // 切换分类：重新加载
+  // 切换分类：用真实分类 ID 重新加载，接口直接按分类取数
   const handleCategory = (cat: CategoryOption) => {
     setSelectedCat(cat.type_name);
     setTab("featured");
-    const passToApi = /^\d+$/.test(cat.type_id) ? cat.type_id : "";
-    // 非数字分类（全部/按名称筛选）明确清锁，取全库再前端筛
-    loadList(1, false, passToApi, selectedYear, passToApi === "");
+    const passToApi = /^\d+$/.test(cat.type_id) ? cat.type_id : "0";
+    loadList(1, false, passToApi, selectedYear);
   };
 
   // 切换年份：重新加载（年份走接口 year 参数；若源站不支持，退化为前端过滤）
   const handleYear = (year: string) => {
     setSelectedYear(year);
     setTab("featured");
-    loadList(1, false, apiTypeId, year, apiTypeId === "");
+    loadList(1, false, apiTypeId, year);
   };
 
   // 搜索
@@ -320,12 +320,10 @@ export default function ShortsHomePage() {
     }
   };
 
-  // 前端兜底过滤：分类按 type_name、年份按 vod_time（接口 year 未生效时本地再筛）
+  // 前端兜底过滤：年份按 vod_time（接口 year 未生效时本地再筛）
+  // 分类不再前端过滤——接口已按真实分类 ID 取数
   const visibleDramas = (() => {
     let list = dramas;
-    if (tab === "featured" && nameFilter) {
-      list = list.filter((d) => d.type_name === nameFilter);
-    }
     if (tab === "featured" && selectedYear) {
       list = list.filter((d) => (d.vod_time || "").slice(0, 4) === selectedYear);
     }
@@ -470,7 +468,7 @@ export default function ShortsHomePage() {
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <p className="text-red-400 mb-4">{error}</p>
             <button
-              onClick={() => loadList(1, false, apiTypeId, selectedYear, apiTypeId === "")}
+              onClick={() => loadList(1, false, apiTypeId, selectedYear)}
               className="px-6 py-2 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
             >
               重试
@@ -535,7 +533,7 @@ export default function ShortsHomePage() {
             {tab === "featured" && page < pagecount && (
               <div className="flex justify-center mt-10">
                 <button
-                  onClick={() => loadList(page + 1, true, apiTypeId, selectedYear, apiTypeId === "")}
+                  onClick={() => loadList(page + 1, true, apiTypeId, selectedYear)}
                   disabled={loading}
                   className="px-8 py-2.5 bg-white/5 hover:bg-white/10 disabled:opacity-50 rounded-full text-sm text-gray-300 hover:text-white transition-colors"
                 >
