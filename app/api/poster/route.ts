@@ -1,92 +1,73 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// 豆瓣海报接口 · 由 Vercel 自带 CDN 加速（无需 Cloudflare）
-// 浏览器请求 /api/poster?id=<豆瓣ID> 直接拿到图片二进制；
-// 首次由本函数去 wmdb 换取并取回图片，之后 Vercel 边缘节点缓存一年，毫秒级返回。
+// 豆瓣海报接口 v4（纯 Vercel 版，不依赖 Cloudflare Worker）
+// 浏览器 -> /api/poster?id=xxx -> wmdb 换取图片地址 -> 带 Referer 取图 -> Vercel CDN 缓存一年
+// wmdb 查不到时返回「暂无海报」占位图，不再返回红色块。
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0';
 
-// 同一实例内缓存 ID -> 图片URL，避免重复查 wmdb
-const urlCache = new Map<string, { url: string; ts: number }>();
-const URL_TTL = 6 * 60 * 60 * 1000; // 6 小时
+// 查不到海报时的占位图（深灰 + 文字），替换原来的红色块
+const PLACEHOLDER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="450"><rect width="300" height="450" fill="#18181b"/><g fill="#52525b" font-family="sans-serif" text-anchor="middle"><text x="150" y="218" font-size="22">暂无海报</text><text x="150" y="248" font-size="12">No Poster</text></g></svg>`;
 
-// 1x1 透明 PNG（无图时返回，避免裂图）
-const BLANK_PNG = new Uint8Array([
-  137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,
-  31,21,196,137,0,0,0,13,73,68,65,84,8,215,99,248,207,192,240,31,0,5,0,1,255,
-  145,0,0,0,65,116,69,88,116,0,0,0,0
-]);
+function placeholder() {
+  return new Response(PLACEHOLDER_SVG, {
+    status: 200,
+    headers: {
+      'Content-Type': 'image/svg+xml; charset=utf-8',
+      // 短缓存：wmdb 后续收录了该片，下次就能刷新成真图
+      'Cache-Control': 'public, s-maxage=3600, max-age=3600',
+    },
+  });
+}
 
+// wmdb 的 ID -> 图片地址。API 结果交给 Vercel Data Cache 缓存 1 天，
+// 避免 wmdb 的 10 秒 1 次限流拖慢页面。
 async function getWmdbUrl(id: string): Promise<string> {
-  const hit = urlCache.get(id);
-  if (hit && Date.now() - hit.ts < URL_TTL) return hit.url;
   try {
     const res = await fetch(
       `https://api.wmdb.tv/movie/api?id=${encodeURIComponent(id)}`,
       {
         headers: { 'User-Agent': UA },
-        signal: AbortSignal.timeout(12000),
-        cache: 'no-store',
+        signal: AbortSignal.timeout(15000),
+        next: { revalidate: 86400 },
       }
     );
-    if (!res.ok) throw new Error(`wmdb HTTP ${res.status}`);
-    const json = await res.json();
+    if (!res.ok) return '';
+    const json: any = await res.json();
     const list = Array.isArray(json?.data) ? json.data : [];
-    let poster = '';
+    // 优先中文条目；跳过 noposter.jpg
     for (const item of list) {
       const p = typeof item?.poster === 'string' ? item.poster : '';
-      if (p.includes('img.wmdb.tv') && !p.includes('noposter')) {
-        poster = p;
-        break;
-      }
+      if (p.includes('img.wmdb.tv') && !p.includes('noposter')) return p;
     }
-    urlCache.set(id, { url: poster, ts: Date.now() });
-    return poster;
-  } catch {
-    return hit?.url || '';
-  }
+  } catch {}
+  return '';
 }
 
-// 图片模式：返回图片二进制 + 长缓存（Vercel 边缘节点缓存一年）
 async function imageResponse(id: string): Promise<Response> {
   const posterUrl = await getWmdbUrl(id);
-  if (!posterUrl) {
-    return new Response(BLANK_PNG, {
-      status: 200,
-      headers: {
-        'Content-Type': 'image/png',
-        'Cache-Control': 'public, s-maxage=604800, max-age=604800',
-      },
-    });
-  }
+  if (!posterUrl) return placeholder();
+
   try {
     const imgRes = await fetch(posterUrl, {
       headers: { 'User-Agent': UA, 'Referer': 'https://movie.douban.com/' },
       signal: AbortSignal.timeout(45000),
       cache: 'force-cache',
     });
-    if (!imgRes.ok) throw new Error(`img HTTP ${imgRes.status}`);
-    const contentType = imgRes.headers.get('content-type') || 'image/jpeg';
+    if (!imgRes.ok) return placeholder();
     return new Response(imgRes.body, {
       status: 200,
       headers: {
-        'Content-Type': contentType,
-        // Vercel 边缘 CDN 缓存一年，浏览器也缓存 7 天
+        'Content-Type': imgRes.headers.get('content-type') || 'image/jpeg',
+        // 图片本身缓存在 Vercel 边缘节点一年，浏览器缓存 7 天
         'Cache-Control': 'public, s-maxage=31536000, max-age=604800, immutable',
       },
     });
   } catch {
-    // 取图临时失败：短缓存后重试，不返回裂图
-    return new Response(BLANK_PNG, {
-      status: 200,
-      headers: {
-        'Content-Type': 'image/png',
-        'Cache-Control': 'public, s-maxage=60, max-age=60',
-      },
-    });
+    return placeholder();
   }
 }
 
@@ -96,12 +77,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ poster: '' }, { status: 400 });
   }
 
-  // mode=json 兼容旧调用；默认返回图片二进制
+  // mode=json 兼容旧调用
   const mode = request.nextUrl.searchParams.get('mode') || '';
   if (mode === 'json') {
-    const posterUrl = await getWmdbUrl(id);
     return NextResponse.json(
-      { poster: posterUrl ? `/api/poster?id=${id}` : '' },
+      { poster: `/api/poster?id=${id}` },
       { headers: { 'Cache-Control': 'public, s-maxage=604800, max-age=604800' } }
     );
   }
