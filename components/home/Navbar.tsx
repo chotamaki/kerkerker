@@ -11,6 +11,16 @@ interface NavbarProps {
   onSearchOpen: () => void;
 }
 
+// 导航项类型：children 可选（当前无下拉项，但渲染逻辑仍兼容）
+interface NavItem {
+  href?: string;
+  label: string;
+  icon: any;
+  mobileOnly?: boolean;
+  external?: boolean;
+  children?: { href: string; label: string }[];
+}
+
 export function Navbar({ scrolled, onSearchOpen }: NavbarProps) {
   const router = useRouter();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -27,7 +37,7 @@ export function Navbar({ scrolled, onSearchOpen }: NavbarProps) {
     };
   }, [isMobileMenuOpen]);
 
-  const navItems = [
+  const navItems: NavItem[] = [
     { href: "/", label: "首页", icon: Home },
     { href: "/browse/movies", label: "电影", icon: Film },
     { href: "/browse/tv", label: "电视剧", icon: Tv },
