@@ -38,7 +38,8 @@ export function Navbar({ scrolled, onSearchOpen }: NavbarProps) {
       label: "短剧",
       icon: Video,
       children: [
-        { href: "/shorts", label: "短剧" },
+        { href: "/shorts/home", label: "短剧封面" },
+        { href: "/shorts", label: "短剧播放" },
         { href: "/dailymotion", label: "短剧Motion" },
       ],
     },
@@ -117,15 +118,14 @@ export function Navbar({ scrolled, onSearchOpen }: NavbarProps) {
                           strokeLinecap="round"
                           strokeLinejoin="round"
                           strokeWidth={2}
-                          d="M19 9l-7 7-7-7"
+                          d="M4 6h16M4 12h16M4 18h7"
                         />
                       </svg>
                     </button>
-                    {/* 下拉菜单 - 使用 pt-2 创建无缝hover区域 */}
+                    {/* 下拉菜单 */}
                     {openDropdown === item.label && (
                       <div className="absolute top-full left-0 pt-1">
                         <div className="py-2 bg-zinc-900 rounded-lg shadow-2xl border border-zinc-800 min-w-[140px] overflow-hidden">
-                          {/* 顶部红色装饰线 - Netflix风格 */}
                           <div className="absolute top-1 left-0 right-0 h-0.5 bg-red-600" />
                           {item.children.map((child) => (
                             <Link
