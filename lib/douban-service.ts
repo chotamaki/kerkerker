@@ -20,12 +20,11 @@ const IMAGE_FIELDS = ['cover', 'poster_horizontal', 'poster_vertical', 'img', 'i
  * 递归扫描数据，用豆瓣 ID 换取有效海报替换失效图床地址。
  * 只在浏览器端执行（服务端无法请求相对路径 /api/poster）。
  */
-async function repairBrokenImages<T>(input: T): Promise<T> {
+function repairBrokenImages<T>(input: T): T {
   if (typeof window === 'undefined') return input
 
-  interface FixTask { node: Record<string, any>; id: string }
-  const tasks: FixTask[] = []
-
+  // 直接把失效图床地址指向本项目的 /api/poster?id=豆瓣ID
+  // 图片二进制由 Vercel 代理 wmdb 取回并缓存在边缘节点，之后秒开
   const walk = (node: any) => {
     if (!node || typeof node !== 'object') return
     if (Array.isArray(node)) {
@@ -33,46 +32,21 @@ async function repairBrokenImages<T>(input: T): Promise<T> {
       return
     }
     const id = typeof node.id === 'string' && /^\d{4,12}$/.test(node.id) ? node.id : ''
-    const hasBroken = IMAGE_FIELDS.some(
-      (f) => typeof node[f] === 'string' && node[f].includes(BROKEN_IMAGE_HOST)
-    )
-    if (id && hasBroken) tasks.push({ node, id })
-    Object.values(node).forEach(walk)
+    if (!id) {
+      Object.values(node).forEach(walk)
+      return
+    }
+    let changed = false
+    for (const f of IMAGE_FIELDS) {
+      if (typeof node[f] === 'string' && node[f].includes(BROKEN_IMAGE_HOST)) {
+        node[f] = `/api/poster?id=${id}`
+        changed = true
+      }
+    }
+    if (!changed) Object.values(node).forEach(walk)
   }
 
   walk(input)
-  if (tasks.length === 0) return input
-
-  // 去重 ID，限制并发，避免一次发出几十个请求
-  const ids = Array.from(new Set(tasks.map((t) => t.id)))
-  const posterMap = new Map<string, string>()
-  const queue = [...ids]
-  const CONCURRENCY = 6
-  const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
-    while (queue.length) {
-      const id = queue.shift()!
-      try {
-        const res = await fetch(`/api/poster?id=${id}`)
-        if (!res.ok) continue
-        const json = await res.json()
-        if (json?.poster) posterMap.set(id, json.poster)
-      } catch {
-        // 单个换取失败不影响整体
-      }
-    }
-  })
-  await Promise.all(workers)
-
-  for (const { node, id } of tasks) {
-    const poster = posterMap.get(id)
-    if (!poster) continue
-    for (const f of IMAGE_FIELDS) {
-      if (typeof node[f] === 'string' && node[f].includes(BROKEN_IMAGE_HOST)) {
-        node[f] = poster
-      }
-    }
-  }
-
   return input
 }
 
@@ -101,7 +75,7 @@ async function fetchFromService<T>(endpoint: string, options?: RequestInit): Pro
     // 清缓存类请求无需修复图片
     if (options?.method === 'DELETE') return result;
 
-    return await repairBrokenImages(result);
+    return repairBrokenImages(result);
   } catch (error) {
     console.error(`Douban API error [${endpoint}]:`, error);
     throw error;
