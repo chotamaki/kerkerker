@@ -34,15 +34,7 @@ export function Navbar({ scrolled, onSearchOpen }: NavbarProps) {
     { href: "/calendar", label: "追剧日历", icon: Calendar },
     { href: "/browse/latest", label: "最新", icon: Clock },
     { href: "/history", label: "历史记录", icon: History, mobileOnly: true },
-    {
-      label: "短剧",
-      icon: Video,
-      children: [
-        { href: "/shorts/home", label: "短剧封面" },
-        { href: "/shorts", label: "短剧播放" },
-        { href: "/dailymotion", label: "短剧Motion" },
-      ],
-    },
+    { href: "/shorts/home", label: "短剧", icon: Video },
     {
       href: "https://github.com/unilei/kerkerker",
       label: "Github",
