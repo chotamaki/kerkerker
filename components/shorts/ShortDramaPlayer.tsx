@@ -10,6 +10,50 @@ interface ShortDramaPlayerProps {
   onProgress?: (progress: number, duration: number) => void;
 }
 
+/**
+ * 解析播放地址：短剧源（如量子资源 lzzy）返回的 vod_play_url 是分享页链接
+ * （例如 https://lzv34.com/share/xxx），而不是 m3u8 直链。
+ * 分享页 HTML 里藏着 var main = "/xxx/index.m3u8?sign=..." 这样的真实地址。
+ *
+ * 原播放器直接把分享页当 m3u8 交给 hls.js → 必然 "视频加载失败"。
+ * 本函数在浏览器端（用户国内网络）抓取分享页、提取真实 m3u8 再播放，
+ * 不走 Vercel 代理（海外节点访问国内域名会 404）。
+ */
+async function resolvePlayableUrl(rawUrl: string): Promise<string> {
+  if (!rawUrl) return rawUrl;
+
+  // 已经是 m3u8 直链，直接用
+  if (/\.m3u8(\?|$)/i.test(rawUrl)) return rawUrl;
+
+  try {
+    // 抓取分享页 HTML（源站有 Access-Control-Allow-Origin: *，浏览器可跨域读）
+    const response = await fetch(rawUrl, {
+      mode: "cors",
+      signal: AbortSignal.timeout(10000),
+      cache: "no-store",
+    });
+    if (!response.ok) return rawUrl;
+
+    const html = await response.text();
+
+    // 提取 var main = "..." / var main='...' 里的 m3u8 路径
+    const match =
+      html.match(/var\s+main\s*=\s*["']([^"']+\.m3u8[^"']*)["']/i) ||
+      html.match(/["']([^"']+\.m3u8[^"']*)["']/i);
+    if (!match || !match[1]) return rawUrl;
+
+    const m3u8Path = match[1];
+    const base = new URL(rawUrl);
+
+    // 绝对路径直接返回；相对路径拼上分享页域名
+    if (/^https?:\/\//i.test(m3u8Path)) return m3u8Path;
+    return `${base.protocol}//${base.host}${m3u8Path.startsWith("/") ? "" : "/"}${m3u8Path}`;
+  } catch {
+    // 解析失败（CORS/网络/格式不符），返回原始地址让播放器按原逻辑处理
+    return rawUrl;
+  }
+}
+
 export function ShortDramaPlayer({
   videoUrl,
   isActive,
@@ -23,10 +67,23 @@ export function ShortDramaPlayer({
 
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
 
-  // 初始化播放器
+  // 第一步：先把可能是分享页的地址解析成真实 m3u8
   useEffect(() => {
-    if (!containerRef.current || !videoUrl) return;
+    let cancelled = false;
+    setResolvedUrl(null);
+    resolvePlayableUrl(videoUrl).then((url) => {
+      if (!cancelled) setResolvedUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [videoUrl]);
+
+  // 第二步：用解析后的地址初始化播放器
+  useEffect(() => {
+    if (!containerRef.current || !resolvedUrl) return;
 
     isMountedRef.current = true;
     setIsLoading(true);
@@ -56,7 +113,7 @@ export function ShortDramaPlayer({
 
         const art = new Artplayer({
           container: containerRef.current,
-          url: videoUrl,
+          url: resolvedUrl,
           type: "m3u8",
           volume: 0.8,
           muted: false,
@@ -179,7 +236,7 @@ export function ShortDramaPlayer({
         hlsRef.current = null;
       }
     };
-  }, [videoUrl]);
+  }, [resolvedUrl]);
 
   // 控制播放/暂停
   useEffect(() => {
@@ -209,12 +266,10 @@ export function ShortDramaPlayer({
       artRef.current.destroy();
       artRef.current = null;
     }
-    // 触发重新初始化
-    const container = containerRef.current;
-    if (container) {
-      container.innerHTML = "";
-    }
-  }, []);
+    setResolvedUrl(null);
+    // 重新触发解析（用微任务确保状态已更新）
+    resolvePlayableUrl(videoUrl).then((url) => setResolvedUrl(url));
+  }, [videoUrl]);
 
   return (
     <div className="relative w-full h-full bg-black">
