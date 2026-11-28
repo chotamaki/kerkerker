@@ -10,6 +10,7 @@ interface DramaItem {
   vod_remarks: string;
   type_name?: string;
   source?: string;
+  vod_time?: string;
 }
 
 interface HistoryItem {
@@ -21,8 +22,21 @@ interface HistoryItem {
   timestamp: number;
 }
 
+interface CategoryOption {
+  type_id: string;
+  type_name: string;
+  byName?: string; // 若设置，则前端按此 type_name 过滤，不传 t 参数
+}
+
 const HISTORY_KEY = "shorts_play_history_v1";
 const MAX_HISTORY = 80;
+
+// 兜底分类（源站不返回 class 时，按 type_name 前端过滤）
+const FALLBACK_CATEGORIES: CategoryOption[] = [
+  { type_id: "", type_name: "全部" },
+  { type_id: "", type_name: "真人短剧", byName: "短剧" },
+  { type_id: "", type_name: "AI漫剧", byName: "AI漫剧" },
+];
 
 function PlayIcon() {
   return (
@@ -106,12 +120,27 @@ export default function ShortsHomePage() {
   const [keyword, setKeyword] = useState("");
   const [history, setHistory] = useState<HistoryItem[]>([]);
 
-  // 加载精选列表
-  const loadList = useCallback(async (p: number, append: boolean) => {
+  // 分类与年份筛选
+  const [categories, setCategories] = useState<CategoryOption[]>(FALLBACK_CATEGORIES);
+  // selectedCat 用 type_name 作为唯一标识（避免空 type_id 冲突）
+  const [selectedCat, setSelectedCat] = useState<string>("全部");
+  const [selectedYear, setSelectedYear] = useState<string>("");
+  const [years, setYears] = useState<string[]>([]);
+
+  // 加载精选列表（带分类/年份筛选）
+  // clearType=true 表示明确传 t=（空）以清除后台分类锁定，取全库混合
+  const loadList = useCallback(async (p: number, append: boolean, typeId?: string, year?: string, clearType?: boolean) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/shorts/list?pg=${p}`);
+      let url = `/api/shorts/list?pg=${p}`;
+      if (typeId) {
+        url += `&t=${encodeURIComponent(typeId)}`;
+      } else if (clearType) {
+        url += `&t=`;
+      }
+      if (year) url += `&year=${encodeURIComponent(year)}`;
+      const res = await fetch(url);
       const json = await res.json();
       if (json.code !== 200 || !json.data) {
         throw new Error(json.msg || "加载失败");
@@ -123,11 +152,38 @@ export default function ShortsHomePage() {
         vod_pic: d.vod_pic || "",
         vod_remarks: d.vod_remarks || "",
         type_name: d.type_name || "",
+        vod_time: d.vod_time || "",
         source: src,
       }));
       setDramas((prev) => (append ? [...prev, ...list] : list));
       setPage(p);
       setPagecount(json.data.pagecount || 1);
+
+      // 用源站返回的 class 动态生成分类按钮
+      const serverClass: CategoryOption[] = Array.isArray(json.data.class)
+        ? json.data.class
+            .map((c: any) => ({
+              type_id: String(c.type_id ?? ""),
+              type_name: String(c.type_name ?? ""),
+            }))
+            .filter((c: CategoryOption) => c.type_name)
+        : [];
+      // 源站分类太多时只保留常见的短剧相关类，避免按钮爆炸
+      if (serverClass.length > 0 && serverClass.length <= 20) {
+        setCategories([{ type_id: "", type_name: "全部" }, ...serverClass]);
+      }
+
+      // 从本页数据的 vod_time 提取年份，供年份筛选
+      const foundYears = Array.from(
+        new Set(
+          list
+            .map((d) => (d.vod_time || "").slice(0, 4))
+            .filter((y) => /^\d{4}$/.test(y))
+        )
+      ).sort((a, b) => b.localeCompare(a));
+      if (foundYears.length > 0) {
+        setYears((prev) => (prev.length === 0 ? foundYears : prev));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载失败");
     } finally {
@@ -136,8 +192,32 @@ export default function ShortsHomePage() {
   }, []);
 
   useEffect(() => {
-    loadList(1, false);
+    // 首屏取全库混合（清除后台分类锁定），这样真人短剧/AI漫剧都能看到
+    loadList(1, false, "", "", true);
   }, [loadList]);
+
+  // 当前选中的分类配置（用 type_name 作唯一标识）
+  const currentCat = categories.find((c) => c.type_name === selectedCat);
+  // 前端按名称过滤的值（兜底分类用）
+  const nameFilter = currentCat?.byName || "";
+  // 真正传给接口的分类 ID（仅数字 type_id）
+  const apiTypeId = currentCat && /^\d+$/.test(currentCat.type_id) ? currentCat.type_id : "";
+
+  // 切换分类：重新加载
+  const handleCategory = (cat: CategoryOption) => {
+    setSelectedCat(cat.type_name);
+    setTab("featured");
+    const passToApi = /^\d+$/.test(cat.type_id) ? cat.type_id : "";
+    // 非数字分类（全部/按名称筛选）明确清锁，取全库再前端筛
+    loadList(1, false, passToApi, selectedYear, passToApi === "");
+  };
+
+  // 切换年份：重新加载（年份走接口 year 参数；若源站不支持，退化为前端过滤）
+  const handleYear = (year: string) => {
+    setSelectedYear(year);
+    setTab("featured");
+    loadList(1, false, apiTypeId, year, apiTypeId === "");
+  };
 
   // 搜索
   const doSearch = async () => {
@@ -160,6 +240,7 @@ export default function ShortsHomePage() {
         vod_pic: d.vod_pic || "",
         vod_remarks: d.vod_remarks || "",
         type_name: d.type_name || "",
+        vod_time: d.vod_time || "",
         source: src,
       }));
       setDramas(list);
@@ -239,6 +320,18 @@ export default function ShortsHomePage() {
     }
   };
 
+  // 前端兜底过滤：分类按 type_name、年份按 vod_time（接口 year 未生效时本地再筛）
+  const visibleDramas = (() => {
+    let list = dramas;
+    if (tab === "featured" && nameFilter) {
+      list = list.filter((d) => d.type_name === nameFilter);
+    }
+    if (tab === "featured" && selectedYear) {
+      list = list.filter((d) => (d.vod_time || "").slice(0, 4) === selectedYear);
+    }
+    return list;
+  })();
+
   const displayList =
     tab === "history"
       ? history.map((h) => ({
@@ -248,7 +341,7 @@ export default function ShortsHomePage() {
           vod_remarks: formatTime(h.timestamp),
           source: h.source,
         }))
-      : dramas;
+      : visibleDramas;
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white">
@@ -320,6 +413,43 @@ export default function ShortsHomePage() {
               </button>
             ))}
           </div>
+
+          {/* 分类 + 年份筛选（仅精选Tab显示） */}
+          {tab === "featured" && (
+            <div className="flex flex-wrap items-center gap-3 mt-3">
+              {/* 分类 */}
+              <div className="flex flex-wrap items-center gap-2">
+                {categories.map((cat) => (
+                  <button
+                    key={cat.type_id || "all"}
+                    onClick={() => handleCategory(cat)}
+                    className={`px-3 py-1 rounded-full text-xs transition-colors ${
+                      selectedCat === cat.type_name
+                        ? "bg-red-600 text-white"
+                        : "bg-white/5 text-gray-400 hover:bg-white/10 hover:text-white"
+                    }`}
+                  >
+                    {cat.type_name}
+                  </button>
+                ))}
+              </div>
+              {/* 年份下拉 */}
+              {years.length > 0 && (
+                <select
+                  value={selectedYear}
+                  onChange={(e) => handleYear(e.target.value)}
+                  className="bg-white/5 border border-white/10 rounded-full px-3 py-1 text-xs text-gray-300 focus:outline-none"
+                >
+                  <option value="">全部年份</option>
+                  {years.map((y) => (
+                    <option key={y} value={y} className="bg-zinc-900">
+                      {y}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
         </div>
       </header>
 
@@ -340,7 +470,7 @@ export default function ShortsHomePage() {
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <p className="text-red-400 mb-4">{error}</p>
             <button
-              onClick={() => loadList(1, false)}
+              onClick={() => loadList(1, false, apiTypeId, selectedYear, apiTypeId === "")}
               className="px-6 py-2 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
             >
               重试
@@ -364,7 +494,7 @@ export default function ShortsHomePage() {
                 ? "还没有观看记录，点开一部短剧就会出现在这里"
                 : tab === "search"
                   ? "没有找到相关短剧，换个关键词试试"
-                  : "暂无短剧内容"}
+                  : "该分类暂无内容，试试其他分类"}
             </p>
             {tab !== "featured" && (
               <button
@@ -405,7 +535,7 @@ export default function ShortsHomePage() {
             {tab === "featured" && page < pagecount && (
               <div className="flex justify-center mt-10">
                 <button
-                  onClick={() => loadList(page + 1, true)}
+                  onClick={() => loadList(page + 1, true, apiTypeId, selectedYear, apiTypeId === "")}
                   disabled={loading}
                   className="px-8 py-2.5 bg-white/5 hover:bg-white/10 disabled:opacity-50 rounded-full text-sm text-gray-300 hover:text-white transition-colors"
                 >
