@@ -86,22 +86,32 @@ export default function PlayPage() {
         const result = await response.json();
         if (result.code === 200 && result.data) {
           setPlayerConfig(result.data);
-          // 根据配置决定初始模式 - 与 UnifiedPlayer.tsx 的 selectBestPlayerMode 保持一致
-          if (result.data.mode === "auto") {
-            // 检查是否有可用的 iframe 播放器
-            const hasEnabledIframePlayers = result.data.iframePlayers?.some(
-              (p: { enabled: boolean }) => p.enabled
-            );
+          // 检测是否移动设备：手机浏览器（尤其国产内核）即便支持 MediaSource，
+          // 本地 hls.js 播放也常卡在转圈，因此手机默认走 iframe 播放器。
+          const isMobile =
+            typeof window !== "undefined" &&
+            (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|UCBrowser|MQQBrowser|MicroMessenger/i.test(
+              navigator.userAgent
+            ) ||
+              ("ontouchstart" in window && window.innerWidth <= 1024));
+
+          // 检查是否有可用的 iframe 播放器
+          const hasEnabledIframePlayers = result.data.iframePlayers?.some(
+            (p: { enabled: boolean }) => p.enabled
+          );
+
+          // 决策逻辑：
+          // - 手机：优先 iframe（兼容性好，实测能播），用户仍可手动切换
+          // - 电脑：保持原逻辑，代理 + 支持 HLS 时用本地播放器（功能更强）
+          if (isMobile && hasEnabledIframePlayers) {
+            setPlayerMode("iframe");
+          } else if (result.data.mode === "auto") {
             // 检查是否启用了代理（本地播放器必需）
             const proxyEnabled = result.data.enableProxy;
             // 检查浏览器是否支持 HLS（MediaSource API）
             const supportsHLS =
               typeof window !== "undefined" && "MediaSource" in window;
 
-            // 决策逻辑（与 UnifiedPlayer.tsx 完全一致）：
-            // - 如果启用代理且浏览器支持 HLS，优先使用本地播放器
-            // - 如果没有启用代理或不支持 HLS，使用 iframe 播放器
-            // - 如果 iframe 播放器也没有可用的，降级到本地播放器
             if (proxyEnabled && supportsHLS) {
               setPlayerMode("local");
             } else if (hasEnabledIframePlayers) {
