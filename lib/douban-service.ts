@@ -24,8 +24,8 @@ function repairBrokenImages<T>(input: T): T {
   if (typeof window === 'undefined') return input
 
   // 图片版本号：改动后浏览器/MongoDB 缓存的旧图会立即失效，强制重新出图。
-  // 若以后又需要强制刷新，把 3 改成 4、5……即可。
-  const POSTER_V = '3';
+  // 若以后又需要强制刷新，把 4 改成 5、6……即可。
+  const POSTER_V = '4';
 
   // 直接把失效图床地址指向本项目的 /api/poster?id=豆瓣ID
   // 图片二进制由 Vercel 代理 wmdb 取回并缓存在边缘节点，之后秒开
