@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   ShortDramaSwiper,
   type ShortDrama,
@@ -23,6 +23,9 @@ export default function ShortsPage() {
   // 多源支持
   const [sources, setSources] = useState<Source[]>([]);
   const [currentSource, setCurrentSource] = useState("wwzy");
+
+  // 从封面页跳转过来时，记录要定位的剧（只用一次）
+  const targetRef = useRef<{ vodId: string } | null>(null);
 
   // 获取短剧详情（获取集数信息）
   const fetchDramaDetail = async (
@@ -93,11 +96,47 @@ export default function ShortsPage() {
           })
         );
 
-        // 保留有名称的短剧：即便详情接口暂时失败也能显示封面，
-        // 避免整页被过滤成「暂无短剧内容」
-        const validDramas = dramasWithEpisodes.filter(
+        // 保留有名称的短剧：即便详情接口暂时失败也能显示封面
+        let validDramas = dramasWithEpisodes.filter(
           (d) => d.vod_name && d.vod_name.trim() !== ""
         );
+
+        // 如果从封面页指定了某部剧，把它放到第一位（这样进来就是这部剧）
+        const target = targetRef.current;
+        if (!append && target && target.vodId) {
+          const idx = validDramas.findIndex(
+            (d) => String(d.vod_id) === target.vodId
+          );
+          if (idx > 0) {
+            const picked = validDramas.splice(idx, 1)[0];
+            validDramas = [picked, ...validDramas];
+          } else if (idx === -1) {
+            // 该剧不在当前页，单独取它的详情，插到最前面
+            try {
+              const detailRes = await fetch(
+                `/api/shorts/detail?ids=${target.vodId}&source=${activeSource}`
+              );
+              const detailJson = await detailRes.json();
+              if (detailJson.code === 200 && detailJson.data) {
+                const d = detailJson.data;
+                const picked: ShortDrama = {
+                  vod_id: d.vod_id,
+                  vod_name: d.vod_name,
+                  vod_pic: d.vod_pic,
+                  vod_remarks: d.vod_remarks,
+                  episodes:
+                    d.episodes && d.episodes.length > 0
+                      ? d.episodes
+                      : [{ name: d.vod_remarks || "正片", url: "" }],
+                };
+                validDramas = [picked, ...validDramas];
+              }
+            } catch {
+              // 单独取详情失败则退回默认列表
+            }
+          }
+          targetRef.current = null; // 定位只执行一次
+        }
 
         if (append) {
           setDramas((prev) => [...prev, ...validDramas]);
@@ -110,7 +149,6 @@ export default function ShortsPage() {
       } catch (err) {
         console.error("[Shorts Fetch Error]", err);
         if (!append) {
-          // 显示真实错误原因，而不是笼统的「加载失败」
           const msg = err instanceof Error ? err.message : "加载失败";
           setError(msg);
         }
@@ -122,10 +160,15 @@ export default function ShortsPage() {
     []
   );
 
-  // 初始加载
+  // 初始加载：读取封面页带来的 URL 参数（vod_id / source）
   useEffect(() => {
-    fetchDramas(1, currentSource);
-  }, [fetchDramas, currentSource]);
+    const params = new URLSearchParams(window.location.search);
+    const vodId = params.get("vod_id");
+    const source = params.get("source") || "wwzy";
+    if (vodId) targetRef.current = { vodId };
+    setCurrentSource(source);
+    fetchDramas(1, source, false);
+  }, [fetchDramas]);
 
   // 加载更多
   const handleLoadMore = useCallback(() => {
@@ -134,19 +177,21 @@ export default function ShortsPage() {
       setPage(nextPage);
       fetchDramas(nextPage, currentSource, true);
     }
-  }, [loadingMore, hasMore, page, currentSource]);
+  }, [loadingMore, hasMore, page, currentSource, fetchDramas]);
 
   // 切换源
   const handleSourceChange = useCallback(
     (newSource: string) => {
       if (newSource !== currentSource) {
+        targetRef.current = null; // 手动切源后不再定位
         setCurrentSource(newSource);
         setPage(1);
         setDramas([]);
         setHasMore(true);
+        fetchDramas(1, newSource, false);
       }
     },
-    [currentSource]
+    [currentSource, fetchDramas]
   );
 
   // 加载状态
