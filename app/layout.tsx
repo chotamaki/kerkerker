@@ -44,6 +44,11 @@ export default function RootLayout({
         <meta name="x5-page-mode" content="app" />
         <meta name="browsermode" content="application" />
 
+        {/* ===== PWA：添加到主屏幕所需的声明 ===== */}
+        <link rel="manifest" href="/manifest.json" />
+        <meta name="theme-color" content="#0a0a0a" />
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
         {/* Google Analytics */}
         <Script
           src="https://www.googletagmanager.com/gtag/js?id=G-FXGFKZZHR7"
@@ -55,6 +60,17 @@ export default function RootLayout({
             function gtag(){dataLayer.push(arguments);}
             gtag('js', new Date());
             gtag('config', 'G-FXGFKZZHR7');
+          `}
+        </Script>
+
+        {/* ===== 注册 PWA Service Worker（体积异常时不注册，避免拖慢） ===== */}
+        <Script id="register-sw" strategy="afterInteractive">
+          {`
+            if ('serviceWorker' in navigator) {
+              window.addEventListener('load', function () {
+                navigator.serviceWorker.register('/sw.js').catch(function () {});
+              });
+            }
           `}
         </Script>
       </head>
