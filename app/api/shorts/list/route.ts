@@ -23,12 +23,15 @@ export interface ShortDrama {
 export interface ShortsListResponse {
   code: number;
   msg: string;
-  page: number;
-  pagecount: number;
-  total: number;
-  list: ShortDrama[];
-  source: string;
-  sources: { key: string; name: string }[];
+  data: {
+    page: number;
+    pagecount: number;
+    total: number;
+    list: ShortDrama[];
+    source: string;
+    sources: { key: string; name: string }[];
+    class: { type_id: number | string; type_name: string }[];
+  };
 }
 
 export async function GET(request: NextRequest) {
@@ -36,6 +39,9 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const page = searchParams.get("pg") || "1";
     const sourceKey = searchParams.get("source");
+    // 前端可选：分类 ID（覆盖后台配置的 typeId）、年份筛选
+    const typeIdOverride = searchParams.get("t");
+    const yearFilter = searchParams.get("year");
 
     let sources: ShortDramaSource[];
     try {
@@ -73,8 +79,16 @@ export async function GET(request: NextRequest) {
         const safeApiBase = (await assertSafeOutboundUrl(source.api)).toString();
 
         let apiUrl = `${safeApiBase}?pg=${page}`;
-        if (source.typeId) {
-          apiUrl += `&t=${source.typeId}`;
+        // 分类：只要前端传了 t 参数（包括空串=取全库），就用它覆盖后台 typeId
+        const effectiveTypeId =
+          typeIdOverride !== null ? typeIdOverride : source.typeId;
+        if (effectiveTypeId !== undefined && effectiveTypeId !== null && effectiveTypeId !== "") {
+          apiUrl += `&t=${effectiveTypeId}`;
+        }
+        // 若 effectiveTypeId 为空串，则不加 t 参数 —— 源站默认返回全部分类混合
+        // 年份：苹果 CMS 标准为 &year=，部分源站不支持则忽略
+        if (yearFilter) {
+          apiUrl += `&year=${encodeURIComponent(yearFilter)}`;
         }
 
         const response = await fetch(apiUrl, {
@@ -95,6 +109,19 @@ export async function GET(request: NextRequest) {
           throw new Error("源站返回数据格式异常（无 list 字段）");
         }
 
+        // 透传源站分类列表（class），供前端动态生成分类筛选按钮
+        const rawClass = Array.isArray(data?.class)
+          ? data.class
+          : Array.isArray(data?.type)
+            ? data.type
+            : [];
+        const classes = rawClass
+          .map((c: any) => ({
+            type_id: c.type_id ?? c.id ?? "",
+            type_name: c.type_name ?? c.name ?? "",
+          }))
+          .filter((c: any) => c.type_name);
+
         // 成功：把实际命中的源透传给前端，便于前端详情请求用同一个源
         return NextResponse.json({
           code: 200,
@@ -113,6 +140,7 @@ export async function GET(request: NextRequest) {
             })),
             source: source.key,
             sources: sources.map((s) => ({ key: s.key, name: s.name })),
+            class: classes,
           },
         });
       } catch (err) {
